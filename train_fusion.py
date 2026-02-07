@@ -39,6 +39,12 @@ def parse_args():
         type=str,
         default="models/checkpoints/best_swin_classifier.pth",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to fusion checkpoint to resume training from",
+    )
     return parser.parse_args()
 
 
@@ -143,7 +149,12 @@ def main():
     logger = setup_logger("solinfitec", log_file=cfg.logging.log_file, level=cfg.logging.level)
     logger.info("Starting Multi-Modal Fusion training")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     logger.info(f"Device: {device}")
 
     # Generate IoT data
@@ -262,8 +273,29 @@ def main():
     )
     metrics_logger = MetricsLogger(log_dir=cfg.logging.tensorboard_dir)
 
+    # Resume from checkpoint
+    start_epoch = 0
+    if args.resume and Path(args.resume).exists():
+        logger.info(f"Resuming from checkpoint: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "multitask_loss_state" in ckpt:
+            multitask_loss.load_state_dict(ckpt["multitask_loss_state"])
+        if "scheduler_state_dict" in ckpt:
+            lr_scheduler.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "early_stopping_state" in ckpt:
+            es_state = ckpt["early_stopping_state"]
+            early_stopping.best_score = es_state["best_score"]
+            early_stopping.counter = es_state["counter"]
+        if "best_val_total_loss" in ckpt:
+            checkpoint.best_score = ckpt["best_val_total_loss"]
+        start_epoch = ckpt.get("epoch", 0) + 1
+        logger.info(f"Resumed from epoch {start_epoch - 1}, continuing from epoch {start_epoch}")
+
     # Training loop
-    for epoch in range(cfg.fusion_training.epochs):
+    for epoch in range(start_epoch, cfg.fusion_training.epochs):
         logger.info(f"\n--- Epoch {epoch + 1}/{cfg.fusion_training.epochs} ---")
 
         train_loss = train_one_epoch(
@@ -288,9 +320,14 @@ def main():
         metrics_logger.log_scalar("fusion/val_disease_acc", val_disease_acc, epoch)
         metrics_logger.log_scalar("fusion/val_outbreak_mae", val_outbreak_mae, epoch)
 
-        # Checkpoint
+        # Checkpoint (save all states for resume)
         checkpoint(model, val_loss, epoch, optimizer, extra={
             "multitask_loss_state": multitask_loss.state_dict(),
+            "scheduler_state_dict": lr_scheduler.scheduler.state_dict(),
+            "early_stopping_state": {
+                "best_score": early_stopping.best_score,
+                "counter": early_stopping.counter,
+            },
         })
 
         if early_stopping(val_loss):
