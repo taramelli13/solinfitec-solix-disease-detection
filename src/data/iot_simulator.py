@@ -92,6 +92,83 @@ class IoTSimulator:
         self.num_fields = config.get("num_fields", 50)
         self.days = config.get("days", 365)
 
+    def calibrate_from_real_data(self, csv_path: str) -> Dict[str, Dict]:
+        """Calibrate simulator parameters from real sensor data (e.g. Grape Disease Dataset).
+
+        Reads a CSV with columns: Temperature, Humidity, LW (leaf wetness).
+        Computes statistics and updates internal config for more realistic simulation.
+
+        Args:
+            csv_path: Path to CSV file with real sensor readings.
+
+        Returns:
+            Dict with computed statistics for each variable.
+        """
+        df = pd.read_csv(csv_path)
+        # Normalize column names (strip whitespace)
+        df.columns = df.columns.str.strip()
+
+        stats = {}
+
+        if "Temperature" in df.columns:
+            temp = pd.to_numeric(df["Temperature"], errors="coerce").dropna()
+            stats["temperature"] = {
+                "mean": float(temp.mean()),
+                "std": float(temp.std()),
+                "min": float(temp.min()),
+                "max": float(temp.max()),
+            }
+            # Update config
+            self.config.setdefault("temperature", {})
+            self.config["temperature"]["base_mean"] = round(float(temp.mean()), 2)
+            self.config["temperature"]["noise_std"] = round(float(temp.std() * 0.5), 2)
+            logger.info(
+                f"Calibrated temperature: mean={temp.mean():.2f}, std={temp.std():.2f}"
+            )
+
+        if "Humidity" in df.columns:
+            hum = pd.to_numeric(df["Humidity"], errors="coerce").dropna()
+            stats["humidity"] = {
+                "mean": float(hum.mean()),
+                "std": float(hum.std()),
+                "min": float(hum.min()),
+                "max": float(hum.max()),
+            }
+            self.config.setdefault("humidity", {})
+            self.config["humidity"]["base_mean"] = round(float(hum.mean()), 2)
+            self.config["humidity"]["noise_std"] = round(float(hum.std() * 0.5), 2)
+            logger.info(
+                f"Calibrated humidity: mean={hum.mean():.2f}, std={hum.std():.2f}"
+            )
+
+        if "LW" in df.columns:
+            lw = pd.to_numeric(df["LW"], errors="coerce").dropna()
+            stats["leaf_wetness"] = {
+                "mean": float(lw.mean()),
+                "std": float(lw.std()),
+                "min": float(lw.min()),
+                "max": float(lw.max()),
+            }
+            logger.info(
+                f"Leaf wetness stats: mean={lw.mean():.2f}, std={lw.std():.2f}"
+            )
+
+        # Compute cross-correlation between temperature and humidity
+        if "Temperature" in df.columns and "Humidity" in df.columns:
+            temp = pd.to_numeric(df["Temperature"], errors="coerce")
+            hum = pd.to_numeric(df["Humidity"], errors="coerce")
+            valid = temp.notna() & hum.notna()
+            if valid.sum() > 10:
+                corr = temp[valid].corr(hum[valid])
+                stats["temp_humidity_correlation"] = float(corr)
+                # Update anti-correlation factor based on real data
+                if corr < 0:
+                    self.config["humidity"]["anti_corr_factor"] = round(float(corr * hum[valid].std() / temp[valid].std()), 2)
+                logger.info(f"Temp-Humidity correlation: {corr:.3f}")
+
+        logger.info(f"Calibration complete from {csv_path}")
+        return stats
+
     def _generate_temperature(self) -> np.ndarray:
         """Seasonal base + diurnal cycle + AR(1) noise."""
         cfg = self.config.get("temperature", {})

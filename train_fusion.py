@@ -31,6 +31,31 @@ from src.utils.logging_utils import setup_logger
 from src.utils.seed import set_seed
 
 
+class _TransformWrapper(torch.utils.data.Dataset):
+    """Wraps a Subset to apply a specific image transform.
+
+    Used to apply train/val transforms to random_split subsets of DiaMOS.
+    """
+
+    def __init__(self, subset, transform):
+        self.subset = subset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        sample = self.subset[idx]
+        if self.transform is not None:
+            # The image comes as a raw numpy array since the parent dataset
+            # was created with transform=None
+            img = sample["image"]
+            if isinstance(img, np.ndarray):
+                img = self.transform(image=img)["image"]
+            sample = {**sample, "image": img}
+        return sample
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Multi-Modal Fusion")
     parser.add_argument("--config", type=str, default="configs/config.yaml")
@@ -44,6 +69,13 @@ def parse_args():
         type=str,
         default=None,
         help="Path to fusion checkpoint to resume training from",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="plantvillage",
+        choices=["plantvillage", "diamos"],
+        help="Dataset to use: 'plantvillage' (default) or 'diamos' (real severity labels)",
     )
     return parser.parse_args()
 
@@ -160,31 +192,75 @@ def main():
     # Generate IoT data
     iot_config = cfg.get_raw("iot_simulation", {})
     iot_sim = IoTSimulator(iot_config, seed=cfg.seed)
+
+    # Calibrate from real sensor data if available
+    calibration_csv = iot_config.get("calibration_csv")
+    if calibration_csv and Path(calibration_csv).exists():
+        logger.info(f"Calibrating IoT simulator from {calibration_csv}")
+        stats = iot_sim.calibrate_from_real_data(calibration_csv)
+        logger.info(f"Calibration stats: {stats}")
+
     iot_data = iot_sim.generate_all()
     geo_data = generate_geo_data(iot_config.get("num_fields", 50), seed=cfg.seed)
     logger.info(f"Generated IoT data for {len(iot_data)} fields")
 
-    # Image data
-    data_dir = os.path.join(cfg.data.raw_dir, cfg.data.dataset_name)
     train_transform = get_train_transforms(img_size=cfg.data.img_size[0])
     val_transform = get_val_transforms(img_size=cfg.data.img_size[0])
 
-    dm = PlantVillageDataModule(
-        data_dir=data_dir,
-        batch_size=cfg.data.batch_size,
-        num_workers=cfg.data.num_workers,
-        train_transform=train_transform,
-        val_transform=val_transform,
-        seed=cfg.seed,
-    )
+    if args.dataset == "diamos":
+        # DiaMOS dataset with real severity labels
+        from src.data.diamos_dataset import DiaMOSMultiModalDataset
 
-    # Create multi-modal datasets
-    train_mm = MultiModalDataset.create_from_datasets(
-        dm.train_dataset, iot_data, geo_data, transform=train_transform,
-    )
-    val_mm = MultiModalDataset.create_from_datasets(
-        dm.val_dataset, iot_data, geo_data, transform=val_transform,
-    )
+        diamos_dir = cfg.get_raw("data", {}).get("diamos_dir", "data/diamos")
+        logger.info(f"Using DiaMOS dataset from {diamos_dir}")
+
+        full_dataset = DiaMOSMultiModalDataset(
+            data_dir=diamos_dir,
+            iot_data=iot_data,
+            geo_data=geo_data,
+            transform=None,  # set per-split below
+            sequence_length=cfg.temporal_model.sequence_length,
+        )
+        num_classes = full_dataset.num_classes
+
+        # Split into train/val
+        n = len(full_dataset)
+        n_train = int(n * cfg.data.train_split)
+        n_val = n - n_train
+        generator = torch.Generator().manual_seed(cfg.seed)
+        train_subset, val_subset = torch.utils.data.random_split(
+            full_dataset, [n_train, n_val], generator=generator,
+        )
+
+        # Wrap subsets to apply different transforms
+        train_mm = _TransformWrapper(train_subset, train_transform)
+        val_mm = _TransformWrapper(val_subset, val_transform)
+
+        # Compute class weights from full dataset
+        class_weights_tensor = full_dataset.get_class_weights().to(device)
+
+        logger.info(f"DiaMOS: {n_train} train, {n_val} val, {num_classes} classes")
+    else:
+        # PlantVillage dataset (default)
+        data_dir = os.path.join(cfg.data.raw_dir, cfg.data.dataset_name)
+
+        dm = PlantVillageDataModule(
+            data_dir=data_dir,
+            batch_size=cfg.data.batch_size,
+            num_workers=cfg.data.num_workers,
+            train_transform=train_transform,
+            val_transform=val_transform,
+            seed=cfg.seed,
+        )
+        num_classes = dm.num_classes
+
+        train_mm = MultiModalDataset.create_from_datasets(
+            dm.train_dataset, iot_data, geo_data, transform=train_transform,
+        )
+        val_mm = MultiModalDataset.create_from_datasets(
+            dm.val_dataset, iot_data, geo_data, transform=val_transform,
+        )
+        class_weights_tensor = dm.train_dataset.get_class_weights().to(device)
 
     train_loader = DataLoader(
         train_mm, batch_size=cfg.data.batch_size,
@@ -214,7 +290,7 @@ def main():
 
     swin_ckpt = args.swin_checkpoint if Path(args.swin_checkpoint).exists() else None
     model = MultiModalFusionModel(
-        num_classes=dm.num_classes,
+        num_classes=num_classes,
         swin_model_name=cfg.model.variant,
         swin_checkpoint=swin_ckpt,
         freeze_swin=cfg.fusion_training.freeze_swin_backbone,
@@ -236,7 +312,7 @@ def main():
     logger.info(f"Fusion model: {total:,} total params, {trainable:,} trainable")
 
     # Loss
-    class_weights = dm.train_dataset.get_class_weights().to(device)
+    class_weights = class_weights_tensor
     criterion = FocalLoss(gamma=cfg.training.focal_gamma, alpha=class_weights)
     multitask_loss = MultiTaskLoss(
         num_tasks=3, task_names=["disease", "outbreak", "severity"]
@@ -265,11 +341,12 @@ def main():
         monitor=cfg.fusion_training.early_stopping.monitor,
         mode=cfg.fusion_training.early_stopping.mode,
     )
+    ckpt_filename = "best_fusion_diamos.pth" if args.dataset == "diamos" else "best_fusion_model.pth"
     checkpoint = ModelCheckpoint(
         save_dir=cfg.paths.checkpoint_dir,
         monitor="val_total_loss",
         mode="min",
-        filename="best_fusion_model.pth",
+        filename=ckpt_filename,
     )
     metrics_logger = MetricsLogger(log_dir=cfg.logging.tensorboard_dir)
 
