@@ -46,6 +46,7 @@ nul
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Additional data (local only)
 data/grape_disease/
