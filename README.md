@@ -1,6 +1,6 @@
 # Solinfitec Solix - Disease Detection & Outbreak Prediction
 
-Sistema multi-modal de deteccao de doencas em culturas e previsao de surtos para o robo Solix da Solinfitec, combinando visao computacional (Swin Transformer), dados IoT/climaticos (Temporal Transformer) e informacoes geoespaciais (Spatial MLP) com fusao por cross-attention.
+Deteccao de doencas em culturas e previsao de surtos para o robo Solix da Solinfitec. O modelo usa tres fontes de dados: imagens de folhas (Swin Transformer), series temporais IoT/climaticas (Temporal Transformer) e coordenadas GPS (Spatial MLP), fundidos por cross-attention.
 
 ## Arquitetura
 
@@ -17,35 +17,47 @@ Geo/GPS ---------> Spatial MLP ----------> Features Espaciais ------+        |
                                                                       |
                                                                       v
                                                                Sistema de Alertas
+                                                               + Dashboard Streamlit
 ```
 
-**Componentes:**
+- Swin Classifier: `swin_tiny_patch4_window7_224` (pretrained ImageNet), cabeca `768 -> 256 -> N classes`, FocalLoss
+- Temporal Encoder: Transformer Encoder, 4 camadas, 8 heads, d_model=128, saida 256-d
+- Spatial MLP: lat/lon/elevacao `3 -> 64 -> 128`
+- Fusao: Cross-Attention (queries=temporal, keys/values=visual+spatial) + Gated Fusion -> 640-d
+- 3 cabecas de saida: classificacao de doenca, regressao de surto (7 dias), severidade ordinal (4 niveis)
+- Multi-task loss com ponderacao por incerteza (Kendall et al. 2018)
 
-- **Swin Classifier**: `swin_tiny_patch4_window7_224` (pretrained ImageNet) com cabeca customizada `768 -> 256 -> 15 classes`, FocalLoss
-- **Temporal Encoder**: Transformer Encoder com 4 camadas, 8 heads, d_model=128, saida 256-d
-- **Spatial MLP**: Encoding de lat/lon/elevacao `3 -> 64 -> 128`
-- **Fusao**: Cross-Attention (queries=temporal, keys/values=visual+spatial) + Gated Fusion -> 640-d
-- **3 Cabecas**: Classificacao de doenca (15 classes), regressao de surto (7 dias), severidade ordinal (4 niveis)
-- **Multi-task Loss**: Ponderacao por incerteza (Kendall et al. 2018)
+## Resultados
 
-## Resultados do Treinamento (Swin Classifier)
+### Swin Classifier - PlantVillage, 15 classes
 
-Treinamento no dataset PlantVillage (~20.600 imagens, 15 classes) com split 70/15/15:
+~20.600 imagens, split 70/15/15:
 
 | Metrica | Resultado |
 |---------|-----------|
-| **Val F1-Score** | 99.69% |
-| **Val Accuracy** | 99.61% |
-| **Val Loss** | 0.0023 |
-| **Melhor Epoch** | 9/50 |
+| Val F1-Score | 99.65% |
+| Val Accuracy | 99.61% |
+| Melhor epoch | 27/50 (early stopping) |
 
-Estrategia de treinamento em 2 fases:
-1. **Epochs 0-9**: Stages 0,1 do Swin congelados, lr=1e-4, CosineAnnealingWarmRestarts
-2. **Epoch 10+**: Descongelamento total, lr reduzido 10x, fine-tuning completo
+### Fusion Model - Multi-modal
 
-## Dataset
+Imagem + IoT + geo, treinamento multi-task:
 
-**PlantVillage** - 15 classes de doencas em folhas:
+| Metrica | Resultado |
+|---------|-----------|
+| Disease Accuracy | 99.64% |
+| Outbreak MAE | 0.0072 |
+| Melhor epoch | 60/100 (early stopping) |
+
+Treinamento em 2 fases:
+1. Epochs 0-9: stages 0,1 do Swin congelados, lr=1e-4, CosineAnnealingWarmRestarts
+2. Epoch 10+: descongelamento total, lr reduzido 10x
+
+## Datasets
+
+### PlantVillage
+
+15 classes de doencas em folhas (~20.600 imagens):
 
 | Classe | Amostras |
 |--------|----------|
@@ -65,22 +77,34 @@ Estrategia de treinamento em 2 fases:
 | Tomato_mosaic_virus | ~373 |
 | Tomato_YellowLeaf_Curl_Virus | ~3,209 |
 
-Desbalanceamento tratado com `WeightedRandomSampler` e augmentacao extra (3x) para classes minoritarias (<500 amostras).
+Classes com menos de 500 amostras recebem augmentacao 3x. `WeightedRandomSampler` equilibra o treinamento.
 
-## Estrutura do Projeto
+### DiaMOS Plant (pera)
+
+3.505 imagens de folhas de pera com severidade anotada (Zenodo 5557313, ~13GB). 4 classes: healthy, spot, curl, slug. Severidade de 0 a 4, mapeada para 0-3.
+
+Download: `python scripts/download_diamos.py`
+
+### Grape Disease (IoT)
+
+10.000 registros IoT de vinhedos (`data/grape_disease/`). Usado para calibrar o simulador IoT -- ajusta as distribuicoes de temperatura, umidade e doenca para corresponder a dados reais.
+
+## Estrutura do projeto
 
 ```
-01_Previsao_Doencas_Visao/
+solinfitec-solix-disease-detection/
 |
 |-- configs/
-|   +-- config.yaml                # Configuracao centralizada (modelo, treino, IoT, alertas)
+|   |-- config.yaml               # Config PlantVillage (15 classes)
+|   +-- config_diamos.yaml         # Config DiaMOS (4 classes, severidade real)
 |
 |-- src/
 |   |-- data/
 |   |   |-- dataset.py             # PlantVillageDataset com split estratificado
+|   |   |-- diamos_dataset.py      # DiaMOS Plant dataset (severidade 0-4 -> 0-3)
 |   |   |-- datamodule.py          # DataLoaders com WeightedRandomSampler
 |   |   |-- preprocessing.py       # Scan de duplicatas, deteccao de corrompidas, mean/std
-|   |   |-- iot_simulator.py       # Simulacao IoT (SEIR, AR(1), gamma zero-inflada)
+|   |   |-- iot_simulator.py       # Simulacao IoT (SEIR, AR(1)) + calibracao
 |   |   |-- weather_client.py      # Cliente Open-Meteo API com cache
 |   |   |-- multimodal_dataset.py  # Dataset multi-modal (imagem + IoT + geo)
 |   |   +-- mqtt_interface.py      # Interface MQTT para Solix
@@ -94,7 +118,7 @@ Desbalanceamento tratado com `WeightedRandomSampler` e augmentacao extra (3x) pa
 |   |-- models/
 |   |   |-- swin_classifier.py     # Swin Transformer com freeze/unfreeze
 |   |   |-- temporal_encoder.py    # Transformer Encoder para series temporais
-|   |   |-- fusion_model.py        # Multi-Modal Fusion (Cross-Attention + Gated)
+|   |   |-- fusion_model.py        # Cross-Attention + Gated Fusion
 |   |   |-- prediction_heads.py    # Classificacao, regressao surto, severidade
 |   |   +-- losses.py              # FocalLoss, LabelSmoothing, MultiTaskLoss
 |   |
@@ -120,7 +144,11 @@ Desbalanceamento tratado com `WeightedRandomSampler` e augmentacao extra (3x) pa
 |   |-- 03_modeling/               # Treinamento Swin e Fusao
 |   +-- 04_evaluation/             # Relatorios de classificacao e surto
 |
-|-- tests/                         # 69 testes unitarios (pytest)
+|-- scripts/
+|   +-- download_diamos.py         # Download do DiaMOS (Zenodo)
+|
+|-- tests/                         # 69 testes (pytest)
+|   |-- conftest.py
 |   |-- test_dataset.py
 |   |-- test_augmentation.py
 |   |-- test_swin_classifier.py
@@ -130,41 +158,58 @@ Desbalanceamento tratado com `WeightedRandomSampler` e augmentacao extra (3x) pa
 |   |-- test_alert_system.py
 |   +-- test_onnx_export.py
 |
-|-- train_classifier.py            # Treinamento do Swin Classifier (Fase 2)
-|-- train_fusion.py                # Treinamento do modelo de fusao (Fase 4)
-|-- evaluate.py                    # Avaliacao no test set
-|-- predict.py                     # Inferencia (PyTorch e ONNX Runtime)
-|-- export_model.py                # Exportacao ONNX para edge
+|-- app_alerts.py                  # Dashboard Streamlit
+|-- train_classifier.py            # Treino do Swin (Fase 2)
+|-- train_fusion.py                # Treino da fusao (Fase 4)
+|-- evaluate.py                    # Avaliacao do classificador
+|-- evaluate_fusion.py             # Avaliacao da fusao
+|-- predict.py                     # Inferencia (PyTorch / ONNX Runtime)
+|-- export_model.py                # Export ONNX para edge
 +-- requirements.txt
 ```
 
 ## Simulacao IoT
 
-Como nao ha dados IoT reais disponiveis, o sistema inclui um simulador realista:
+Nao temos dados IoT suficientes, entao ha um simulador que gera series temporais sinteticas:
 
-- **Temperatura**: Base sazonal + ciclo diurno + ruido AR(1)
-- **Umidade**: Anticorrelacionada com temperatura
-- **Umidade do solo**: Dirigida por chuva com decaimento exponencial
-- **Vento**: Distribuicao log-normal sazonal
-- **Chuva**: Distribuicao gamma zero-inflada
-- **Prevalencia de doenca**: Modelo epidemiologico **SEIR** (Susceptible-Exposed-Infectious-Recovered) onde beta varia com temperatura e umidade
+- Temperatura: base sazonal + ciclo diurno + ruido AR(1)
+- Umidade: anticorrelacionada com temperatura
+- Umidade do solo: dirigida por chuva com decaimento exponencial
+- Vento: distribuicao log-normal sazonal
+- Chuva: gamma zero-inflada
+- Prevalencia de doenca: modelo SEIR (Susceptible-Exposed-Infectious-Recovered), beta varia com temperatura e umidade
 
-Saida em formato Parquet: `data/processed/iot_simulated/field_{id}.parquet`
+O simulador pode ser calibrado com dados reais:
 
-## Sistema de Alertas
+```python
+from src.data.iot_simulator import IoTSimulator
 
-Gera alertas estruturados em JSON com base nas predicoes do modelo:
+simulator = IoTSimulator()
+simulator.calibrate_from_real_data("data/grape_disease/grape_disease_dataset.csv")
+```
+
+Isso ajusta media, variancia e correlacoes para corresponder aos dados de vinhedos. Saida em Parquet: `data/processed/iot_simulated/field_{id}.parquet`
+
+## Dashboard e alertas
+
+```bash
+streamlit run app_alerts.py
+```
+
+O dashboard permite upload de imagens de folhas, mostra Grad-CAM sobre as regioes afetadas, timeline de risco de surto (7 dias) e mapa de severidade.
+
+Os alertas sao gerados em JSON:
 
 | Nivel | Limiar | Acao |
 |-------|--------|------|
 | LOW | < 0.2 | Monitoramento regular |
 | MEDIUM | 0.2 - 0.5 | Aumentar frequencia de inspecao |
-| HIGH | 0.5 - 0.75 | Tratamento direcionado imediato |
+| HIGH | 0.5 - 0.75 | Tratamento direcionado |
 | CRITICAL | > 0.9 | Intervencao de emergencia |
 
-Cada alerta inclui: doenca detectada + confianca, risco de surto por dia (7 dias), estagio de severidade, acoes recomendadas e imagem Grad-CAM.
+Cada alerta traz: doenca + confianca, risco de surto por dia (7 dias), severidade, acoes recomendadas e Grad-CAM.
 
-## Como Usar
+## Como usar
 
 ### Instalacao
 
@@ -172,29 +217,38 @@ Cada alerta inclui: doenca detectada + confianca, risco de surto por dia (7 dias
 pip install -r requirements.txt
 ```
 
-### Treinamento do Classificador
+### Treino do classificador (PlantVillage)
 
 ```bash
 python train_classifier.py
 ```
 
-Configuracoes em `configs/config.yaml`. O treinamento usa:
-- AdamW (weight_decay=0.05)
-- CosineAnnealingWarmRestarts (T_0=10, T_mult=2)
-- FocalLoss (gamma=2.0) com pesos por classe
-- EarlyStopping (patience=10, monitor=val_f1)
-- MixUp (alpha=0.2) + CutMix (alpha=1.0)
+Config em `configs/config.yaml`. Usa AdamW (weight_decay=0.05), CosineAnnealingWarmRestarts (T_0=10, T_mult=2), FocalLoss (gamma=2.0) com pesos por classe, EarlyStopping (patience=10, monitor=val_f1), MixUp (alpha=0.2) e CutMix (alpha=1.0).
 
-### Treinamento do Modelo de Fusao
+### Treino do modelo de fusao
 
 ```bash
+# PlantVillage (15 classes, severidade simulada)
 python train_fusion.py
+
+# DiaMOS Plant (4 classes, severidade real)
+python train_fusion.py --dataset diamos --config configs/config_diamos.yaml
+
+# Retomar treino interrompido
+python train_fusion.py --resume
 ```
 
 ### Avaliacao
 
 ```bash
-python evaluate.py
+python evaluate.py            # classificador Swin
+python evaluate_fusion.py     # modelo de fusao
+```
+
+### Dashboard
+
+```bash
+streamlit run app_alerts.py
 ```
 
 ### Inferencia
@@ -204,13 +258,13 @@ python predict.py --image path/to/leaf.jpg --backend pytorch
 python predict.py --image path/to/leaf.jpg --backend onnx
 ```
 
-### Exportacao ONNX (Edge Deploy)
+### Export ONNX (edge)
 
 ```bash
 python export_model.py
 ```
 
-Exporta para ONNX opset 14 com validacao de saida (diff < 1e-5). Suporte a quantizacao INT8/FP16 para Jetson Xavier.
+ONNX opset 14, validacao de saida (diff < 1e-5). Quantizacao INT8/FP16 para Jetson Xavier.
 
 ### Testes
 
@@ -224,22 +278,24 @@ pytest tests/ -v
 
 | Categoria | Tecnologia |
 |-----------|-----------|
-| Backbone Visual | Swin Transformer (timm) |
-| Encoder Temporal | Transformer Encoder (PyTorch) |
+| Backbone visual | Swin Transformer (timm) |
+| Encoder temporal | Transformer Encoder (PyTorch) |
 | Fusao | Cross-Attention + Gated Fusion |
 | Augmentacao | Albumentations, MixUp, CutMix |
 | Explicabilidade | Grad-CAM (pytorch-grad-cam) |
 | Dados IoT | Simulacao SEIR + Open-Meteo API |
+| Dashboard | Streamlit + Plotly |
 | Comunicacao | MQTT (paho-mqtt) |
 | Export | ONNX (opset 14), ONNX Runtime |
 | Testes | pytest |
 | Tracking | TensorBoard |
 
-## Fases do Projeto
+## Fases do projeto
 
-1. **Fundacao e Pipeline de Dados** - Dataset, augmentacao, preprocessing
-2. **Classificador Swin Transformer** - Fine-tuning com 2 fases de freeze/unfreeze
-3. **Simulacao IoT e Modelo Temporal** - Simulador SEIR + Temporal Transformer
-4. **Fusao Multi-Modal** - Cross-Attention + 3 cabecas de predicao
-5. **Sistema de Alertas** - Geracao de alertas + visualizacoes
-6. **Deploy Edge** - Export ONNX + inferencia otimizada para Jetson Xavier
+1. Fundacao e pipeline de dados - dataset, augmentacao, preprocessing ✅
+2. Classificador Swin Transformer - fine-tuning com freeze/unfreeze em 2 fases ✅
+3. Simulacao IoT e modelo temporal - simulador SEIR + Temporal Transformer ✅
+4. Fusao multi-modal - Cross-Attention + 3 cabecas de predicao ✅
+5. Alertas e dashboard - geracao de alertas + dashboard Streamlit ✅
+6. Integracao de dados reais - DiaMOS Plant + Grape Disease + calibracao IoT ✅
+7. Deploy edge - export ONNX + inferencia para Jetson Xavier

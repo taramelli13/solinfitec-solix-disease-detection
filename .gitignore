@@ -42,6 +42,15 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# Claude Code
+.claude/
+
+# Additional data (local only)
+data/grape_disease/
+data/*.pdf
+scripts/__pycache__/
 
 # pytest
 .pytest_cache/
