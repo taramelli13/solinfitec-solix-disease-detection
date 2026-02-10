@@ -203,7 +203,8 @@ def train(
     mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
     mlflow.set_experiment(mlflow_cfg.get("experiment_fusion", "fusion_multimodal"))
     mlflow.start_run(
-        run_name=f"fusion_{dataset}_e{cfg.fusion_training.epochs}_lr{cfg.fusion_training.learning_rate}"
+        run_name=f"fusion_{dataset}_e{cfg.fusion_training.epochs}_lr{cfg.fusion_training.learning_rate}",
+        nested=bool(mlflow.active_run()),
     )
 
     mlflow.log_params({
@@ -459,20 +460,13 @@ def train(
             logger.info("Early stopping triggered.")
             break
 
-    # Log best checkpoint as artifact
-    ckpt_path = Path(cfg.paths.checkpoint_dir) / ckpt_filename
-    if ckpt_path.exists():
-        mlflow.log_artifact(str(ckpt_path))
+    # Log model via mlflow.pytorch (enables serving + schema)
+    mlflow.pytorch.log_model(model, "model")
 
     # Register model
     model_name = mlflow_cfg.get("registered_model_fusion", "MultiModalFusion")
     run_id = mlflow.active_run().info.run_id
-    client = mlflow.tracking.MlflowClient()
-    try:
-        client.create_registered_model(model_name)
-    except mlflow.exceptions.MlflowException:
-        pass
-    client.create_model_version(name=model_name, source=f"runs:/{run_id}", run_id=run_id)
+    mlflow.register_model(f"runs:/{run_id}/model", model_name)
 
     mlflow.end_run()
     metrics_logger.close()

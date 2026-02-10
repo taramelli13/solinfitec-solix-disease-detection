@@ -134,7 +134,10 @@ def train(config_path="configs/config.yaml", resume=None, overrides=None):
     mlflow_cfg = cfg.get_raw("mlflow", {})
     mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
     mlflow.set_experiment(mlflow_cfg.get("experiment_classifier", "swin_classifier"))
-    mlflow.start_run(run_name=f"swin_e{cfg.training.epochs}_lr{cfg.training.learning_rate}")
+    mlflow.start_run(
+        run_name=f"swin_e{cfg.training.epochs}_lr{cfg.training.learning_rate}",
+        nested=bool(mlflow.active_run()),
+    )
 
     mlflow.log_params({
         "model_variant": cfg.model.variant,
@@ -315,10 +318,8 @@ def train(config_path="configs/config.yaml", resume=None, overrides=None):
             logger.info("Early stopping triggered. Training complete.")
             break
 
-    # Log best checkpoint as artifact
-    ckpt_path = Path(cfg.paths.checkpoint_dir) / "best_swin_classifier.pth"
-    if ckpt_path.exists():
-        mlflow.log_artifact(str(ckpt_path))
+    # Log model via mlflow.pytorch (enables serving + schema)
+    mlflow.pytorch.log_model(model, "model")
 
     # Log evaluation artifacts if they exist
     metrics_dir = Path(cfg.paths.metrics_dir)
@@ -330,12 +331,7 @@ def train(config_path="configs/config.yaml", resume=None, overrides=None):
     # Register model
     model_name = mlflow_cfg.get("registered_model_classifier", "SwinClassifier")
     run_id = mlflow.active_run().info.run_id
-    client = mlflow.tracking.MlflowClient()
-    try:
-        client.create_registered_model(model_name)
-    except mlflow.exceptions.MlflowException:
-        pass
-    client.create_model_version(name=model_name, source=f"runs:/{run_id}", run_id=run_id)
+    mlflow.register_model(f"runs:/{run_id}/model", model_name)
 
     mlflow.end_run()
     metrics_logger.close()
