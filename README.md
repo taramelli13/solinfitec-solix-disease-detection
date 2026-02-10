@@ -145,7 +145,8 @@ solinfitec-solix-disease-detection/
 |   +-- 04_evaluation/             # Relatorios de classificacao e surto
 |
 |-- scripts/
-|   +-- download_diamos.py         # Download do DiaMOS (Zenodo)
+|   |-- download_diamos.py         # Download do DiaMOS (Zenodo)
+|   +-- register_model.py         # Registro de checkpoints no MLflow
 |
 |-- tests/                         # 69 testes (pytest)
 |   |-- conftest.py
@@ -161,6 +162,8 @@ solinfitec-solix-disease-detection/
 |-- app_alerts.py                  # Dashboard Streamlit
 |-- train_classifier.py            # Treino do Swin (Fase 2)
 |-- train_fusion.py                # Treino da fusao (Fase 4)
+|-- tune_classifier.py             # HPO Optuna para Swin
+|-- tune_fusion.py                 # HPO Optuna para fusao
 |-- evaluate.py                    # Avaliacao do classificador
 |-- evaluate_fusion.py             # Avaliacao da fusao
 |-- predict.py                     # Inferencia (PyTorch / ONNX Runtime)
@@ -274,6 +277,44 @@ pytest tests/ -v
 
 69 testes cobrindo dataset, augmentacao, modelos, metricas, simulador IoT, fusao, alertas e export ONNX.
 
+## MLOps
+
+### Experiment tracking (MLflow)
+
+Os scripts de treino logam automaticamente no MLflow: parametros, metricas por epoca e checkpoints como artifacts. O modelo treinado e registrado no Model Registry.
+
+```bash
+# Visualizar experimentos
+mlflow ui --port 5000
+
+# Registrar checkpoints existentes
+python scripts/register_model.py --checkpoint models/checkpoints/best_swin_classifier.pth --model-name SwinClassifier
+python scripts/register_model.py --checkpoint models/checkpoints/best_fusion_model.pth --model-name MultiModalFusion
+```
+
+### Versionamento de dados (DVC)
+
+Datasets versionados com DVC. Os arquivos `.dvc` rastreiam hashes dos dados sem commitar os arquivos no git.
+
+```bash
+dvc status          # verificar estado dos dados
+dvc push            # enviar para remote (quando configurado)
+```
+
+### Hyperparameter optimization (Optuna)
+
+Tuning automatizado com Optuna, integrado ao MLflow para tracking de trials.
+
+```bash
+# Tuning do classificador Swin
+python tune_classifier.py --n-trials 20
+
+# Tuning do modelo de fusao
+python tune_fusion.py --n-trials 20
+```
+
+Os estudos ficam em `optuna.db` (SQLite) e podem ser retomados entre sessoes.
+
 ## Tecnologias
 
 | Categoria | Tecnologia |
@@ -288,7 +329,9 @@ pytest tests/ -v
 | Comunicacao | MQTT (paho-mqtt) |
 | Export | ONNX (opset 14), ONNX Runtime |
 | Testes | pytest |
-| Tracking | TensorBoard |
+| Tracking | MLflow + TensorBoard |
+| Versionamento de dados | DVC |
+| HPO | Optuna + MLflow callback |
 
 ## Fases do projeto
 
@@ -298,4 +341,5 @@ pytest tests/ -v
 4. Fusao multi-modal - Cross-Attention + 3 cabecas de predicao ✅
 5. Alertas e dashboard - geracao de alertas + dashboard Streamlit ✅
 6. Integracao de dados reais - DiaMOS Plant + Grape Disease + calibracao IoT ✅
-7. Deploy edge - export ONNX + inferencia para Jetson Xavier
+7. MLOps - MLflow tracking/registry, DVC, Optuna HPO ✅
+8. Deploy edge - export ONNX + inferencia para Jetson Xavier
