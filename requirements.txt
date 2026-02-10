@@ -29,6 +29,10 @@ onnxruntime>=1.15.0
 
 # Experiment Tracking
 tensorboard>=2.13.0
+mlflow>=2.9.0
+
+# Data Versioning
+dvc>=3.0.0
 
 # IoT & Communication
 paho-mqtt>=1.6.0
@@ -43,6 +47,7 @@ uvicorn>=0.23.0
 
 # Hyperparameter Optimization
 optuna>=3.3.0
+optuna-integration[mlflow]>=4.0.0
 
 # Jupyter
 jupyter>=1.0.0

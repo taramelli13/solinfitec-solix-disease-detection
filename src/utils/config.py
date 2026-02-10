@@ -274,6 +274,51 @@ class ConfigManager:
         self.paths = _nested_dataclass_from_dict(PathsConfig, self._raw.get("paths", {}))
         self.seed: int = self._raw.get("seed", 42)
 
+    def with_overrides(self, overrides: Dict[str, Any]) -> "ConfigManager":
+        """Return a new ConfigManager with overrides applied.
+
+        Keys use dot notation: "training.learning_rate", "data.batch_size".
+        """
+        import copy
+
+        raw = copy.deepcopy(self._raw)
+        for dotted_key, value in overrides.items():
+            keys = dotted_key.split(".")
+            d = raw
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+
+        new = ConfigManager.__new__(ConfigManager)
+        new.config_path = self.config_path
+        new._raw = raw
+        new.data = _nested_dataclass_from_dict(DataConfig, raw.get("data", {}))
+        new.model = _nested_dataclass_from_dict(ModelConfig, raw.get("model", {}))
+        new.temporal_model = _nested_dataclass_from_dict(
+            TemporalModelConfig, raw.get("temporal_model", {})
+        )
+        new.spatial_model = _nested_dataclass_from_dict(
+            SpatialModelConfig, raw.get("spatial_model", {})
+        )
+        new.fusion = _nested_dataclass_from_dict(FusionConfig, raw.get("fusion", {}))
+        new.training = _nested_dataclass_from_dict(
+            TrainingConfig, raw.get("training", {})
+        )
+        new.fusion_training = _nested_dataclass_from_dict(
+            FusionTrainingConfig, raw.get("fusion_training", {})
+        )
+        new.augmentation = _nested_dataclass_from_dict(
+            AugmentationConfig, raw.get("augmentation", {})
+        )
+        new.export = _nested_dataclass_from_dict(ExportConfig, raw.get("export", {}))
+        new.alerts = _nested_dataclass_from_dict(AlertsConfig, raw.get("alerts", {}))
+        new.logging = _nested_dataclass_from_dict(
+            LoggingConfig, raw.get("logging", {})
+        )
+        new.paths = _nested_dataclass_from_dict(PathsConfig, raw.get("paths", {}))
+        new.seed = raw.get("seed", 42)
+        return new
+
     def get_raw(self, key: str, default: Any = None) -> Any:
         """Access raw config dict by dot-separated key."""
         keys = key.split(".")

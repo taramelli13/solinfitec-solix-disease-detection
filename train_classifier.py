@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import torch
 import torch.nn as nn
@@ -109,9 +110,17 @@ def validate(model, dataloader, criterion, device):
     return avg_loss, np.array(all_preds), np.array(all_labels), all_probs
 
 
-def main():
-    args = parse_args()
-    cfg = ConfigManager(args.config)
+def train(config_path="configs/config.yaml", resume=None, overrides=None):
+    """Run classifier training. Returns best val_f1.
+
+    Args:
+        config_path: Path to config YAML.
+        resume: Checkpoint path to resume from.
+        overrides: Dict of dotted config keys to override (for Optuna).
+    """
+    cfg = ConfigManager(config_path)
+    if overrides:
+        cfg = cfg.with_overrides(overrides)
     set_seed(cfg.seed)
 
     logger = setup_logger(
@@ -120,6 +129,26 @@ def main():
         level=cfg.logging.level,
     )
     logger.info("Starting Swin Classifier training")
+
+    # MLflow setup
+    mlflow_cfg = cfg.get_raw("mlflow", {})
+    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
+    mlflow.set_experiment(mlflow_cfg.get("experiment_classifier", "swin_classifier"))
+    mlflow.start_run(run_name=f"swin_e{cfg.training.epochs}_lr{cfg.training.learning_rate}")
+
+    mlflow.log_params({
+        "model_variant": cfg.model.variant,
+        "batch_size": cfg.data.batch_size,
+        "lr": cfg.training.learning_rate,
+        "weight_decay": cfg.training.weight_decay,
+        "optimizer": cfg.training.optimizer,
+        "scheduler": cfg.training.scheduler,
+        "focal_gamma": cfg.training.focal_gamma,
+        "epochs": cfg.training.epochs,
+        "unfreeze_epoch": cfg.training.unfreeze_epoch,
+        "img_size": cfg.data.img_size[0],
+        "seed": cfg.seed,
+    })
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -213,8 +242,8 @@ def main():
 
     # Resume from checkpoint
     start_epoch = 0
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+    if resume:
+        ckpt = torch.load(resume, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         if "optimizer_state_dict" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -267,6 +296,16 @@ def main():
         metrics_logger.log_metrics(val_metrics, epoch, prefix="val/")
         metrics_logger.log_scalar("lr", current_lr, epoch)
 
+        # MLflow metrics
+        mlflow.log_metrics({
+            "train_loss": train_loss,
+            "train_f1": train_metrics["f1_macro"],
+            "val_loss": val_loss,
+            "val_f1": val_metrics["f1_macro"],
+            "val_accuracy": val_metrics["accuracy"],
+            "learning_rate": current_lr,
+        }, step=epoch)
+
         # Checkpoint
         val_f1 = val_metrics["f1_macro"]
         checkpoint(model, val_f1, epoch, optimizer)
@@ -276,8 +315,39 @@ def main():
             logger.info("Early stopping triggered. Training complete.")
             break
 
+    # Log best checkpoint as artifact
+    ckpt_path = Path(cfg.paths.checkpoint_dir) / "best_swin_classifier.pth"
+    if ckpt_path.exists():
+        mlflow.log_artifact(str(ckpt_path))
+
+    # Log evaluation artifacts if they exist
+    metrics_dir = Path(cfg.paths.metrics_dir)
+    for artifact in ["confusion_matrix.png", "roc_curves.png", "test_metrics.json"]:
+        path = metrics_dir / artifact
+        if path.exists():
+            mlflow.log_artifact(str(path))
+
+    # Register model
+    model_name = mlflow_cfg.get("registered_model_classifier", "SwinClassifier")
+    run_id = mlflow.active_run().info.run_id
+    client = mlflow.tracking.MlflowClient()
+    try:
+        client.create_registered_model(model_name)
+    except mlflow.exceptions.MlflowException:
+        pass
+    client.create_model_version(name=model_name, source=f"runs:/{run_id}", run_id=run_id)
+
+    mlflow.end_run()
     metrics_logger.close()
     logger.info("Training finished.")
+
+    best_f1 = checkpoint.best_score if checkpoint.best_score is not None else 0.0
+    return best_f1
+
+
+def main():
+    args = parse_args()
+    train(config_path=args.config, resume=args.resume)
 
 
 if __name__ == "__main__":

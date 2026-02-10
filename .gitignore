@@ -21,8 +21,10 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data (large files)
-data/raw/
+# Data (large files — ignore contents, not dirs, so DVC .dvc files work)
+data/raw/*
+!data/raw/*.dvc
+!data/raw/.gitignore
 data/processed/
 data/external/
 
@@ -50,8 +52,20 @@ CLAUDE.md
 
 # Additional data (local only)
 data/grape_disease/
+!data/grape_disease.dvc
+!data/.gitignore
 data/*.pdf
 scripts/__pycache__/
+
+# MLflow
+mlruns/
+
+# Optuna
+optuna.db
+
+# DVC
+.dvc/tmp/
+.dvc/cache/
 
 # pytest
 .pytest_cache/

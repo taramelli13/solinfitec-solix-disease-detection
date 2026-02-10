@@ -1,0 +1,6 @@
+outs:
+- md5: cb6c872a0a96dc0f79fb4a6f614e0a91.dir
+  size: 287093
+  nfiles: 1
+  hash: md5
+  path: grape_disease

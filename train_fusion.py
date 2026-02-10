@@ -10,6 +10,7 @@ import os
 import sys
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -173,13 +174,51 @@ def validate(model, dataloader, criterion, multitask_loss, device):
     return avg_loss, disease_acc, outbreak_mae
 
 
-def main():
-    args = parse_args()
-    cfg = ConfigManager(args.config)
+def train(
+    config_path="configs/config.yaml",
+    dataset="plantvillage",
+    swin_checkpoint="models/checkpoints/best_swin_classifier.pth",
+    resume=None,
+    overrides=None,
+):
+    """Run fusion training. Returns best val_total_loss (negated, higher is better for Optuna maximize).
+
+    Args:
+        config_path: Path to config YAML.
+        dataset: "plantvillage" or "diamos".
+        swin_checkpoint: Path to pretrained Swin checkpoint.
+        resume: Checkpoint path to resume from.
+        overrides: Dict of dotted config keys to override (for Optuna).
+    """
+    cfg = ConfigManager(config_path)
+    if overrides:
+        cfg = cfg.with_overrides(overrides)
     set_seed(cfg.seed)
 
     logger = setup_logger("solinfitec", log_file=cfg.logging.log_file, level=cfg.logging.level)
     logger.info("Starting Multi-Modal Fusion training")
+
+    # MLflow setup
+    mlflow_cfg = cfg.get_raw("mlflow", {})
+    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
+    mlflow.set_experiment(mlflow_cfg.get("experiment_fusion", "fusion_multimodal"))
+    mlflow.start_run(
+        run_name=f"fusion_{dataset}_e{cfg.fusion_training.epochs}_lr{cfg.fusion_training.learning_rate}"
+    )
+
+    mlflow.log_params({
+        "dataset": dataset,
+        "swin_checkpoint": swin_checkpoint,
+        "batch_size": cfg.data.batch_size,
+        "fusion_lr": cfg.fusion_training.learning_rate,
+        "freeze_swin": cfg.fusion_training.freeze_swin_backbone,
+        "temporal_d_model": cfg.temporal_model.d_model,
+        "temporal_layers": cfg.temporal_model.num_layers,
+        "temporal_nhead": cfg.temporal_model.nhead,
+        "fusion_dim": cfg.fusion.fused_dim,
+        "epochs": cfg.fusion_training.epochs,
+        "seed": cfg.seed,
+    })
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -207,7 +246,7 @@ def main():
     train_transform = get_train_transforms(img_size=cfg.data.img_size[0])
     val_transform = get_val_transforms(img_size=cfg.data.img_size[0])
 
-    if args.dataset == "diamos":
+    if dataset == "diamos":
         # DiaMOS dataset with real severity labels
         from src.data.diamos_dataset import DiaMOSMultiModalDataset
 
@@ -288,7 +327,7 @@ def main():
         "output_dim": cfg.spatial_model.output_dim,
     }
 
-    swin_ckpt = args.swin_checkpoint if Path(args.swin_checkpoint).exists() else None
+    swin_ckpt = swin_checkpoint if Path(swin_checkpoint).exists() else None
     model = MultiModalFusionModel(
         num_classes=num_classes,
         swin_model_name=cfg.model.variant,
@@ -341,7 +380,7 @@ def main():
         monitor=cfg.fusion_training.early_stopping.monitor,
         mode=cfg.fusion_training.early_stopping.mode,
     )
-    ckpt_filename = "best_fusion_diamos.pth" if args.dataset == "diamos" else "best_fusion_model.pth"
+    ckpt_filename = "best_fusion_diamos.pth" if dataset == "diamos" else "best_fusion_model.pth"
     checkpoint = ModelCheckpoint(
         save_dir=cfg.paths.checkpoint_dir,
         monitor="val_total_loss",
@@ -352,9 +391,9 @@ def main():
 
     # Resume from checkpoint
     start_epoch = 0
-    if args.resume and Path(args.resume).exists():
-        logger.info(f"Resuming from checkpoint: {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+    if resume and Path(resume).exists():
+        logger.info(f"Resuming from checkpoint: {resume}")
+        ckpt = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         if "optimizer_state_dict" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -397,6 +436,15 @@ def main():
         metrics_logger.log_scalar("fusion/val_disease_acc", val_disease_acc, epoch)
         metrics_logger.log_scalar("fusion/val_outbreak_mae", val_outbreak_mae, epoch)
 
+        # MLflow metrics
+        mlflow.log_metrics({
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_disease_acc": val_disease_acc,
+            "val_outbreak_mae": val_outbreak_mae,
+            "learning_rate": current_lr,
+        }, step=epoch)
+
         # Checkpoint (save all states for resume)
         checkpoint(model, val_loss, epoch, optimizer, extra={
             "multitask_loss_state": multitask_loss.state_dict(),
@@ -411,8 +459,37 @@ def main():
             logger.info("Early stopping triggered.")
             break
 
+    # Log best checkpoint as artifact
+    ckpt_path = Path(cfg.paths.checkpoint_dir) / ckpt_filename
+    if ckpt_path.exists():
+        mlflow.log_artifact(str(ckpt_path))
+
+    # Register model
+    model_name = mlflow_cfg.get("registered_model_fusion", "MultiModalFusion")
+    run_id = mlflow.active_run().info.run_id
+    client = mlflow.tracking.MlflowClient()
+    try:
+        client.create_registered_model(model_name)
+    except mlflow.exceptions.MlflowException:
+        pass
+    client.create_model_version(name=model_name, source=f"runs:/{run_id}", run_id=run_id)
+
+    mlflow.end_run()
     metrics_logger.close()
     logger.info("Fusion training finished.")
+
+    best_loss = checkpoint.best_score if checkpoint.best_score is not None else float("inf")
+    return best_loss
+
+
+def main():
+    args = parse_args()
+    train(
+        config_path=args.config,
+        dataset=args.dataset,
+        swin_checkpoint=args.swin_checkpoint,
+        resume=args.resume,
+    )
 
 
 if __name__ == "__main__":

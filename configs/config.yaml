@@ -296,6 +296,16 @@ paths:
   metrics_dir: "reports/metrics"
 
 # ============================================================================
+# MLflow
+# ============================================================================
+mlflow:
+  tracking_uri: "file:./mlruns"
+  experiment_classifier: "swin_classifier"
+  experiment_fusion: "fusion_multimodal"
+  registered_model_classifier: "SwinClassifier"
+  registered_model_fusion: "MultiModalFusion"
+
+# ============================================================================
 # Reproducibility
 # ============================================================================
 seed: 42
