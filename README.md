@@ -281,7 +281,7 @@ pytest tests/ -v
 
 ### Experiment tracking (MLflow)
 
-Os scripts de treino logam automaticamente no MLflow: parametros, metricas por epoca e checkpoints como artifacts. O modelo treinado e registrado no Model Registry.
+Os scripts de treino logam automaticamente no MLflow: parametros, metricas por epoca e o modelo final via `mlflow.pytorch.log_model()` (com schema de serving). O modelo e registrado no Model Registry.
 
 ```bash
 # Visualizar experimentos
