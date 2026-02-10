@@ -145,8 +145,7 @@ solinfitec-solix-disease-detection/
 |   +-- 04_evaluation/             # Relatorios de classificacao e surto
 |
 |-- scripts/
-|   |-- download_diamos.py         # Download do DiaMOS (Zenodo)
-|   +-- register_model.py         # Registro de checkpoints no MLflow
+|   +-- download_diamos.py         # Download do DiaMOS (Zenodo)
 |
 |-- tests/                         # 69 testes (pytest)
 |   |-- conftest.py
@@ -238,7 +237,7 @@ python train_fusion.py
 python train_fusion.py --dataset diamos --config configs/config_diamos.yaml
 
 # Retomar treino interrompido
-python train_fusion.py --resume
+python train_fusion.py --resume models/checkpoints/best_fusion_model.pth
 ```
 
 ### Avaliacao
@@ -284,12 +283,7 @@ pytest tests/ -v
 Os scripts de treino logam automaticamente no MLflow: parametros, metricas por epoca e o modelo final via `mlflow.pytorch.log_model()` (com schema de serving). O modelo e registrado no Model Registry.
 
 ```bash
-# Visualizar experimentos
 mlflow ui --port 5000
-
-# Registrar checkpoints existentes
-python scripts/register_model.py --checkpoint models/checkpoints/best_swin_classifier.pth --model-name SwinClassifier
-python scripts/register_model.py --checkpoint models/checkpoints/best_fusion_model.pth --model-name MultiModalFusion
 ```
 
 ### Versionamento de dados (DVC)

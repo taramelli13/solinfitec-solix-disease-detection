@@ -24,7 +24,6 @@ env/
 # Data (large files — ignore contents, not dirs, so DVC .dvc files work)
 data/raw/*
 !data/raw/*.dvc
-!data/raw/.gitignore
 data/processed/
 data/external/
 
